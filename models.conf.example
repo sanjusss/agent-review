@@ -1,0 +1,35 @@
+# agent-review 模型配置示例
+#
+# 复制为 models.conf 后，按本机已安装的命令行工具修改模型ID。
+# 每个模型一个小节，小节名即模型短名称（出现顺序即编号顺序）：
+#   model   = 模型ID（必填）
+#   backend = 调用后端（可选，默认 opencode；可选值：opencode、codex、kimi、cursor、agycli、devin）
+#
+# [summarizer] 小节指定默认汇总模型：
+#   model   = 模型短名称
+
+[codex]
+model = gpt-6-astra
+backend = codex
+
+[glm]
+model = provider/model-id
+
+[gemini]
+model = gemini-3.8-flash-high
+backend = agycli
+
+[grok]
+model = grok-4.7-xhigh
+backend = cursor
+
+[kimi]
+model = provider/model-id
+backend = kimi
+
+[swe]
+model = swe-2-max
+backend = devin
+
+[summarizer]
+model = glm

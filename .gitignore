@@ -1,0 +1,6 @@
+# 本机模型配置，以 models.conf.example 为模板自行创建
+models.conf
+
+# Python 缓存
+__pycache__/
+*.pyc
