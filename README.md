@@ -1,10 +1,44 @@
 # agent-review
 
-多模型代码审核技能：多个模型后端独立审核同一范围，再由一个汇总模型合并去重，生成 Markdown 报告。
+一个代理技能：让多个模型后端独立审核同一范围，再由一个汇总模型合并去重，生成 Markdown 报告。
 
-本目录是一个供 AI 代理调用的技能（`SKILL.md`），仅在使用 `agent-review` 名称明确要求调用时启用；`agent-review.sh` 是执行入口，也可以脱离技能直接使用。
+`SKILL.md` 是技能定义，代理依据其中的规则调用执行入口 `agent-review.sh`（Bash + Python 3 标准库实现）。审核与汇总都通过各家的命令行程序完成；模型只输出自由正文，脚本不解析结构化结果。"完成"只表示进程正常退出且有正文，不代表覆盖了全部范围。
 
-审核与汇总都通过各家的命令行程序完成。模型只输出自由正文，脚本不解析结构化结果；“完成”只表示进程正常退出且有正文，不代表覆盖了全部范围。
+## 安装
+
+将整个目录放到代理的技能目录，目录名保持 `agent-review`（与 `SKILL.md` 的 `name` 一致）：
+
+```bash
+git clone <仓库地址> ~/.agents/skills/agent-review
+# 或复制本目录到以下任一位置：
+#   全局：~/.agents/skills/agent-review
+#        ~/.config/devin/skills/agent-review
+#        ~/.config/cognition/skills/agent-review
+#   项目：<项目>/.agents/skills/agent-review
+#        <项目>/.devin/skills/agent-review
+#        <项目>/.cognition/skills/agent-review
+```
+
+然后创建本机模型配置：
+
+```bash
+cp models.conf.example models.conf
+```
+
+## 调用方式
+
+在对话中使用准确英文名称 `agent-review`（或 `$agent-review`）明确要求调用，例如"使用 `agent-review` 审核最近一次提交"。中文名称、译名或"多模型审核"等描述不满足调用条件。
+
+调用时可通过自然语言向代理说明以下选项，代理按 `SKILL.md` 的规则映射为脚本参数：
+
+| 需求 | 对应参数 | 默认 |
+|---|---|---|
+| 指定审核模型（短名称，空格分隔） | `--review-models "a b"` | 全部模型 |
+| 指定汇总模型 | `--summarizer-model 短名称` | `[summarizer]` 小节 |
+| 每个模型的审核预算 | `--review-timeout`（`s`/`m`/`h`） | `2000s`，最多 2 次尝试 |
+| 单次汇总时间上限 | `--summary-timeout` | `1200s`，最多 3 次尝试 |
+| 指定报告路径 | 第二个位置参数 | 本次运行临时目录下的 `report.md` |
+| 列出可用模型 | `--list-models` | — |
 
 ## 依赖
 
@@ -22,31 +56,15 @@
 
 ## 配置
 
-```bash
-cp models.conf.example models.conf
-```
-
 `models.conf` 每个小节定义一个模型，小节名即 `--review-models` 使用的短名称：
 
 - `model`：模型 ID，原样传给后端 CLI 的 `--model` 参数。
 - `backend`：上表中的后端名，省略时为 `opencode`。
 - `[summarizer]` 小节：默认汇总模型，填其他小节的短名称。
 
-## 用法
+`models.conf` 为本机配置，已被 `.gitignore` 忽略；以 `models.conf.example` 为模板。
 
-```bash
-cd /path/to/被审核项目
-bash /path/to/agent-review/agent-review.sh "审核最近一次提交涉及的登录逻辑"
-```
-
-- 第一个位置参数是审核内容（必填），第二个是报告路径（可选；省略时写入本次运行的独立临时目录 `report.md`）。
-- `--review-models "短名称1 短名称2"`：选择审核模型，默认全部。
-- `--summarizer-model 短名称`：指定汇总模型，默认取 `[summarizer]` 小节。
-- `--review-timeout` / `--summary-timeout`：单次审核 / 汇总的时间预算，支持 `s`、`m`、`h` 后缀；默认 `2000s` / `1200s`。审核最多尝试 2 次，汇总最多 3 次。
-- `--list-models`：列出可用模型与默认汇总模型后退出。
-- `--config`：指定其他配置文件，默认使用技能同目录的 `models.conf`。
-
-## 输出
+## 运行结果
 
 每次运行创建独立临时目录 `${TMPDIR:-/tmp}/agent-review-*`，包含：
 
