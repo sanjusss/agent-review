@@ -12,11 +12,7 @@
 git clone <仓库地址> ~/.agents/skills/agent-review
 # 或复制本目录到以下任一位置：
 #   全局：~/.agents/skills/agent-review
-#        ~/.config/devin/skills/agent-review
-#        ~/.config/cognition/skills/agent-review
 #   项目：<项目>/.agents/skills/agent-review
-#        <项目>/.devin/skills/agent-review
-#        <项目>/.cognition/skills/agent-review
 ```
 
 然后创建本机模型配置：
