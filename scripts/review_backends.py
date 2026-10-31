@@ -4,6 +4,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import selectors
 import shutil
 import signal
@@ -13,20 +14,40 @@ import time
 BACKENDS = ('opencode', 'codex', 'kimi', 'cursor', 'agycli', 'devin')
 
 
-def command(backend, model_id, prompt, work_dir, final_path, seconds, summary=False):
+def effort_error(backend, model_id, effort):
+    """检查思考强度配置；可用或未配置时返回空字符串，否则返回错误说明。"""
+    if not effort:
+        return ''
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', effort):
+        return f'effort 只能包含字母、数字、`.`、`_`、`-`：{effort}'
+    if backend in ('kimi', 'devin'):
+        return f'后端 {backend} 不支持单独设置 effort，请改用模型 ID 或该后端自身的配置'
+    if backend == 'opencode' and '#' in model_id:
+        return '模型 ID 已包含 `#` 变体，不能同时设置 effort'
+    if backend == 'cursor' and 'effort=' in model_id:
+        return '模型 ID 已包含 effort 参数，不能同时设置 effort'
+    return ''
+
+
+def command(backend, model_id, prompt, work_dir, final_path, seconds, summary=False, effort=''):
     env = os.environ.copy()
     if backend == 'codex':
-        args = ['codex', 'exec', '--model', model_id, '-c', 'model_reasoning_effort="high"', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only', '-C', work_dir, '-o', str(final_path), '--json', prompt]
+        args = ['codex', 'exec', '--model', model_id, '-c', f'model_reasoning_effort="{effort or "high"}"', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only', '-C', work_dir, '-o', str(final_path), '--json', prompt]
         native = 'codex'
     elif backend == 'kimi':
         args = ['kimi', '--model', model_id, '--output-format', 'stream-json', '--prompt', prompt]
         native = 'kimi'
     elif backend == 'cursor':
+        if effort:
+            model_id = model_id[:-1] + f',effort={effort}]' if model_id.endswith(']') else f'{model_id}[effort={effort}]'
         args = ['cursor-agent', '-p', '--trust', '--force', '--workspace', work_dir, '--model', model_id, '--output-format', 'stream-json', prompt]
         native = 'cursor'
     elif backend == 'agycli':
         executable = shutil.which('agy') or str(Path.home() / '.local/bin/agy')
-        args = [executable, '-p', prompt, '--mode', 'plan', '--dangerously-skip-permissions', '--output-format', 'text', '--model', model_id, '--print-timeout', f'{max(1, math.ceil(seconds))}s']
+        args = [executable, '-p', prompt, '--mode', 'plan', '--dangerously-skip-permissions', '--output-format', 'text', '--model', model_id]
+        if effort:
+            args += ['--effort', effort]
+        args += ['--print-timeout', f'{max(1, math.ceil(seconds))}s']
         native = 'text'
     elif backend == 'devin':
         args = ['devin', '--model', model_id, '--permission-mode', 'dangerous',
@@ -37,7 +58,7 @@ def command(backend, model_id, prompt, work_dir, final_path, seconds, summary=Fa
         config = {'agent': {role: {'description': '代码审核' if not summary else '审核结果汇总', 'mode': 'primary', 'temperature': 0.2, 'permission': {'*': 'allow', 'edit': 'deny'}}}}
         env['OPENCODE_CONFIG_CONTENT'] = json.dumps(config, ensure_ascii=False)
         env.pop('OPENCODE_SERVER_PASSWORD', None)
-        args = ['opencode', 'run', '--standalone', '--model', model_id, '--agent', role, '--title', 'agent-review-summary' if summary else 'agent-review', '--format', 'json', prompt]
+        args = ['opencode', 'run', '--standalone', '--model', f'{model_id}#{effort}' if effort else model_id, '--agent', role, '--title', 'agent-review-summary' if summary else 'agent-review', '--format', 'json', prompt]
         native = 'opencode'
     return args, env, native
 

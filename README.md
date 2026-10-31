@@ -56,7 +56,16 @@ cp models.conf.example models.conf
 
 - `model`：模型 ID，原样传给后端 CLI 的 `--model` 参数。
 - `backend`：上表中的后端名，省略时为 `opencode`。
+- `effort`：思考强度（可选）。取值只能包含字母、数字、`.`、`_`、`-`，具体可选值由各命令行程序校验；传递方式见下表。
 - `[summarizer]` 小节：默认汇总模型，填其他小节的短名称。
+
+| backend | `effort` 传递方式 | 省略时 |
+|---|---|---|
+| `opencode` | `--model 模型ID#值`（opencode 变体名，取值随服务商而定） | 不传 |
+| `codex` | `-c model_reasoning_effort="值"` | `high` |
+| `cursor` | `--model '模型ID[effort=值]'`（仅参数化模型接受，其他模型运行时失败） | 不传 |
+| `agycli` | `--effort 值` | 不传 |
+| `kimi`、`devin` | 不支持，配置即报错 | — |
 
 `models.conf` 为本机配置，已被 `.gitignore` 忽略；以 `models.conf.example` 为模板。
 

@@ -4,6 +4,8 @@
 # 每个模型一个小节，小节名即模型短名称（出现顺序即编号顺序）：
 #   model   = 模型ID（必填）
 #   backend = 调用后端（可选，默认 opencode；可选值：opencode、codex、kimi、cursor、agycli、devin）
+#   effort  = 思考强度（可选，值原样传给后端；省略时 codex 传 high、其他后端不传，
+#             使用命令行程序自身默认；kimi、devin 不支持，配置了会报错）
 #
 # [summarizer] 小节指定默认汇总模型：
 #   model   = 模型短名称

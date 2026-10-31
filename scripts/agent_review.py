@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 
-from review_backends import BACKENDS, command, execute
+from review_backends import BACKENDS, command, effort_error, execute
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -123,7 +123,11 @@ def load_config(path):
             continue
         backend = cfg.get(name, 'backend', fallback='opencode').strip()
         require(backend in BACKENDS, f'模型 {name} 的后端无效：{backend}')
-        models[name] = dict(name=name, model_id=cfg.get(name, 'model').strip(), backend=backend)
+        model_id = cfg.get(name, 'model').strip()
+        effort = cfg.get(name, 'effort', fallback='').strip()
+        error = effort_error(backend, model_id, effort)
+        require(not error, f'模型 {name} 的配置无效：{error}')
+        models[name] = dict(name=name, model_id=model_id, backend=backend, effort=effort)
     require(models, '配置文件未定义模型')
     default = cfg.get('summarizer', 'model', fallback=next(iter(models))).strip()
     require(default in models, '默认汇总模型未定义')
@@ -208,7 +212,7 @@ class ReviewRun:
         if seconds <= 0 or self.stop.is_set():
             return (130 if self.stop.is_set() else 124), 0.0, '运行被中断' if self.stop.is_set() else '时间预算已用完'
         args, env, native = command(model['backend'], model['model_id'], cli_prompt, self.state['work_dir'],
-                                    final_path, seconds, summary)
+                                    final_path, seconds, summary, effort=model.get('effort', ''))
         # 只用于排障和测试识别，模型命令不依赖这两个变量。
         env['AGENT_REVIEW_MODEL'] = model['name']
         env['AGENT_REVIEW_ROLE'] = 'summary' if summary else 'review'
@@ -376,9 +380,9 @@ def main(argv=None):
     try:
         models, default = load_config(args.config)
         if args.list_models:
-            print(f'{"name":<16} {"model_id":<36} backend')
+            print(f'{"name":<16} {"model_id":<36} {"backend":<10} effort')
             for model in models.values():
-                print(f'{model["name"]:<16} {model["model_id"]:<36} {model["backend"]}')
+                print(f'{model["name"]:<16} {model["model_id"]:<36} {model["backend"]:<10} {model.get("effort") or "-"}')
             print(f'\ndefault_summarizer={default}')
             return 0
         run = ReviewRun(args, models, default)

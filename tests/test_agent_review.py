@@ -309,6 +309,82 @@ model = a
             unrelated.terminate()
             unrelated.wait(timeout=3)
 
+    def test_effort_is_passed_to_supported_backends(self):
+        self.config.write_text("""[a]
+model = mock/a
+backend = opencode
+effort = low
+[b]
+model = mock/b
+backend = codex
+effort = xhigh
+[d]
+model = mock/d
+backend = cursor
+effort = medium
+[e]
+model = mock/e
+backend = agycli
+effort = max
+[g]
+model = mock/g[context=1m]
+backend = cursor
+effort = high
+[summarizer]
+model = a
+""", encoding="utf-8")
+        self.result(self.invoke("--review-models", "a b d e g", "审核代码"), status="complete")
+        argv = {row["request"]["model"]: row["argv"] for row in self.calls("review")}
+        self.assertEqual(argv["a"][argv["a"].index("--model") + 1], "mock/a#low")
+        self.assertIn('model_reasoning_effort="xhigh"', argv["b"])
+        self.assertNotIn('model_reasoning_effort="high"', argv["b"])
+        self.assertEqual(argv["d"][argv["d"].index("--model") + 1], "mock/d[effort=medium]")
+        self.assertEqual(argv["e"][argv["e"].index("--effort") + 1], "max")
+        self.assertEqual(argv["g"][argv["g"].index("--model") + 1], "mock/g[context=1m,effort=high]")
+        summary_argv = self.calls("summary")[0]["argv"]
+        self.assertEqual(summary_argv[summary_argv.index("--model") + 1], "mock/a#low")
+        listed = self.invoke("--list-models", defaults=False)
+        self.assertEqual(listed.returncode, 0, listed.stdout)
+        a_row = next(line.split() for line in listed.stdout.splitlines() if line.split()[:1] == ["a"])
+        self.assertEqual(a_row, ["a", "mock/a", "opencode", "low"])
+
+    def test_effort_defaults_when_unset(self):
+        text = self.config.read_text(encoding="utf-8")
+        self.config.write_text(text.replace("backend = codex\n", "backend = codex\neffort =\n"),
+                               encoding="utf-8")
+        self.result(self.invoke("--review-models", "a b d e", "审核代码"), status="complete")
+        argv = {row["request"]["model"]: row["argv"] for row in self.calls("review")}
+        self.assertEqual(argv["a"][argv["a"].index("--model") + 1], "mock/a")
+        self.assertIn('model_reasoning_effort="high"', argv["b"])
+        self.assertEqual(argv["d"][argv["d"].index("--model") + 1], "mock/d")
+        self.assertNotIn("--effort", argv["e"])
+        listed = self.invoke("--list-models", defaults=False)
+        self.assertEqual(listed.returncode, 0, listed.stdout)
+        a_row = next(line.split() for line in listed.stdout.splitlines() if line.split()[:1] == ["a"])
+        self.assertEqual(a_row[-1], "-")
+
+    def test_invalid_effort_fails_before_launch(self):
+        sections = {
+            "kimi": "model = mock/x\nbackend = kimi\neffort = high\n",
+            "devin": "model = mock/x\nbackend = devin\neffort = high\n",
+            "variant": "model = mock/x#high\nbackend = opencode\neffort = low\n",
+            "param": "model = mock/x[effort=low]\nbackend = cursor\neffort = high\n",
+            "space": "model = mock/x\nbackend = opencode\neffort = hi gh\n",
+            "quote": 'model = mock/x\nbackend = opencode\neffort = high"\n',
+            "hash": "model = mock/x\nbackend = opencode\neffort = high#x\n",
+            "brackets": "model = mock/x\nbackend = opencode\neffort = a[b]\n",
+        }
+        for name, section in sections.items():
+            with self.subTest(name=name):
+                self.config.write_text("[a]\nmodel = mock/a\nbackend = opencode\n"
+                                       f"[{name}]\n{section}"
+                                       "[summarizer]\nmodel = a\n", encoding="utf-8")
+                result = self.invoke("审核代码", defaults=False)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("错误：", result.stdout)
+                self.assertIn(name, result.stdout)
+                self.assertEqual(self.calls(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
