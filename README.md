@@ -2,7 +2,7 @@
 
 一个代理技能：让多个模型后端独立审核同一范围，再由一个汇总模型合并去重，生成 Markdown 报告。
 
-`SKILL.md` 是技能定义，代理依据其中的规则调用执行入口 `agent-review.sh`（Bash + Python 3 标准库实现）。审核与汇总都通过各家的命令行程序完成；模型只输出自由正文，脚本不解析结构化结果。"完成"只表示进程正常退出且有正文，不代表覆盖了全部范围。
+`SKILL.md` 是技能定义，代理依据其中的规则调用执行入口 `agent-review.sh`（Bash + Python 3 标准库实现）。审核与汇总都通过各家的命令行程序完成；每次尝试分配独立的 `result/result.md` 供模型记录并修订自由正文，脚本不解析结构化结果。"完成"只表示进程正常退出且专属结果文件非空，不代表覆盖了全部范围。
 
 ## 安装
 
@@ -43,12 +43,12 @@ cp models.conf.example models.conf
 
 | backend | 命令行程序 | 说明 |
 |---|---|---|
-| `opencode`（默认） | `opencode` | 以 `--format json` 事件流读取正文 |
-| `codex` | `codex` | `codex exec`，只读沙箱 |
-| `kimi` | `kimi` | `stream-json` 输出 |
-| `cursor` | `cursor-agent` | `stream-json` 输出 |
-| `agycli` | `agy` | 纯文本输出，`--print-timeout` 跟随剩余预算 |
-| `devin` | `devin` | `-p` 非交互模式，纯文本输出 |
+| `opencode`（默认） | `opencode` | `--standalone` 运行，仅放行当次结果目录的 `edit` 权限 |
+| `codex` | `codex` | `codex exec`，项目只读，仅放行当次结果目录写权限 |
+| `kimi` | `kimi` | 非交互模式，通过 `--add-dir` 放行当次结果目录 |
+| `cursor` | `cursor-agent` | 非交互模式，通过 `--add-dir` 放行当次结果目录 |
+| `agycli` | `agy` | `--mode accept-edits`，`--print-timeout` 跟随剩余预算 |
+| `devin` | `devin` | `-p` 非交互模式 |
 
 ## 配置
 
@@ -75,8 +75,8 @@ cp models.conf.example models.conf
 
 - `run.json`：运行状态、各模型每次尝试的退出码与正文字数。
 - `run.log`：运行日志。
-- `models/<编号>/answer.md`：各模型的审核正文；`attempt-N/` 下是当次尝试的原始 stdout/stderr。
-- `summary/`：汇总尝试与最终报告正文。
+- `models/<编号>/answer.md`：各模型的审核正文；`attempt-N/` 下含当次专属结果 `result/result.md` 及原始 `stdout.log`、`stderr.log`。
+- `summary/`：各次汇总尝试的 `result/result.md`、原始日志与最终报告正文 `report-body.md`。
 
 报告文件只含汇总正文，不含运行信息。退出码：
 

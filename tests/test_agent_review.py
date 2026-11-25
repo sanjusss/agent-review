@@ -149,14 +149,26 @@ model = a
         rows = self.calls("review")
         self.assertEqual(len(rows), 6)
         self.assertEqual({row["request"]["model"] for row in rows}, set("abcdef"))
-        prompts = {row["request"]["prompt"] for row in rows}
+        result_files = {row["result_file"] for row in rows}
+        self.assertEqual(len(result_files), 6)
+        prompts = {row["request"]["prompt"].replace(row["result_file"], "<RESULT_FILE>") for row in rows}
         self.assertEqual(len(prompts), 1)
         self.assertIn("审核代码", prompts.pop())
         self.assertTrue(all(row["cwd"] == str(self.project) for row in rows))
-        argv = {row["request"]["model"]: row["argv"] for row in rows}
-        self.assertIn("-o", argv["b"])
+        by_model = {row["request"]["model"]: row for row in rows}
+        argv = {model: row["argv"] for model, row in by_model.items()}
+        for model in ("b", "c", "d", "e"):
+            result_dir = str(Path(by_model[model]["result_file"]).parent)
+            self.assertIn("--add-dir", argv[model])
+            self.assertEqual(argv[model][argv[model].index("--add-dir") + 1], result_dir)
+        self.assertNotIn("-o", argv["b"])
+        self.assertNotIn("-s", argv["b"])
+        self.assertIn('default_permissions="agent_review"', argv["b"])
+        self.assertTrue(any("permissions.agent_review=" in arg and str(Path(by_model["b"]["result_file"]).parent) in arg
+                            for arg in argv["b"]))
         self.assertIn("--prompt", argv["c"])
         self.assertIn("--workspace", argv["d"])
+        self.assertEqual(argv["e"][argv["e"].index("--mode") + 1], "accept-edits")
         self.assertIn("--print-timeout", argv["e"])
         self.assertIn("--respect-workspace-trust", argv["f"])
         self.assertIn("--permission-mode", argv["f"])
@@ -167,8 +179,12 @@ model = a
         seconds = int(match[1]) * {"": 1, "s": 1, "m": 60, "h": 3600}[match[2]]
         self.assertGreater(seconds, 0)
         self.assertLessEqual(seconds, 5)
-        opencode = next(row for row in rows if row["request"]["model"] == "a")
+        opencode = by_model["a"]
         self.assertIsNotNone(opencode["opencode_config"])
+        opencode_cfg = json.loads(opencode["opencode_config"])
+        a_result_dir = str(Path(opencode["result_file"]).parent)
+        self.assertEqual(opencode_cfg["agent"]["code-reviewer"]["permission"]["edit"],
+                         {"*": "deny", f"{a_result_dir}/*": "allow"})
         self.assertFalse(opencode["server_password_set"])
 
     def test_prompt_asks_for_free_text_without_json_protocol(self):
@@ -178,9 +194,12 @@ model = a
         self.assertNotIn("run_id", review_prompt)
         self.assertIn("不要输出 JSON", review_prompt)
         self.assertIn("严重程度", review_prompt)
+        self.assertIn("本次结果文件（唯一可写路径）：", review_prompt)
         summary_prompt = self.calls("summary")[0]["request"]["prompt"]
         self.assertIn("汇总", summary_prompt)
         self.assertIn("模型 a", summary_prompt)
+        self.assertIn("重新读取本次结果文件逐项自检", summary_prompt)
+        self.assertIn("本次结果文件（唯一可写路径）：", summary_prompt)
         self.assertNotIn("AGENT_REVIEW_JSON", summary_prompt)
 
     def test_every_backend_can_summarize(self):
@@ -242,12 +261,46 @@ model = a
 
     def test_large_answers_use_prompt_file(self):
         self.set_rules({"review": {"body_size": 30000}})
-        self.result(self.invoke("审核代码"), status="complete")
+        self.result(self.invoke("--summarizer-model", "c", "审核代码"), status="complete")
         summary_rows = self.calls("summary")
         self.assertTrue(summary_rows)
         self.assertTrue(all(row["prompt_file"] for row in summary_rows))
         for row in summary_rows:
             self.assertTrue(all(len(arg.encode()) < 48000 for arg in row["argv"]))
+            add_dirs = [row["argv"][i + 1] for i, arg in enumerate(row["argv"][:-1]) if arg == "--add-dir"]
+            self.assertIn(str(Path(row["result_file"]).parent), add_dirs)
+            self.assertIn(str(Path(row["prompt_file"]).parent), add_dirs)
+
+    def test_models_can_revise_result_file_and_stdout_noise_is_ignored(self):
+        self.set_rules({"review": {"mode": "revise"}, "summary": {"mode": "revise"}})
+        run, data = self.result(self.invoke("审核代码"), status="complete")
+        for model in data["models"].values():
+            answer = Path(model["answer"]).read_text(encoding="utf-8")
+            self.assertIn("空值导致请求失败", answer)
+            self.assertNotIn("DELETED_FALSE_POSITIVE", answer)
+            self.assertNotIn("正在检查调用方", answer)
+            self.assertNotIn("已完成修订", answer)
+        report = (run / "report.md").read_text(encoding="utf-8")
+        self.assertIn("汇总结论", report)
+        self.assertNotIn("DELETED_FALSE_POSITIVE", report)
+        self.assertNotIn("正在检查调用方", report)
+
+    def test_stdout_without_result_file_retries_and_fails(self):
+        for mode, expected_error in (("stdout_only", "未生成结果文件"), ("empty_file", "结果文件为空")):
+            with self.subTest(mode=mode):
+                self.set_rules({"review": {"mode": mode}})
+                before = len(self.calls("review"))
+                run, data = self.result(self.invoke("--review-models", "a", "审核代码"), code=1, status="failed")
+                self.assertEqual(len(self.calls("review")) - before, 2)
+                self.assertEqual(data["models"]["m1"]["error"], expected_error)
+                self.assertFalse((run / "report.md").exists())
+
+    def test_retry_overwrites_longer_failed_draft_with_shorter_valid_revision(self):
+        self.set_rules({"review:a": [{"mode": "write_then_fail", "body_size": 500}, {}]})
+        _, data = self.result(self.invoke("--review-models", "a", "审核代码"), status="complete")
+        answer = Path(data["models"]["m1"]["answer"]).read_text(encoding="utf-8")
+        self.assertIn("空值导致请求失败", answer)
+        self.assertNotIn("x" * 100, answer)
 
     def test_timeout_keeps_partial_answer(self):
         self.set_rules({"review:a": {"mode": "partial_then_sleep"}})

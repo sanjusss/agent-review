@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """多模型代码审核：所有模型审核同一范围，汇总为 Markdown 报告。
 
-模型只输出自由正文，脚本不解析模型的结构化结果；
-“完成”只表示进程正常退出并且有正文，不表示覆盖了全部范围。
+模型在当次尝试的专属结果文件中写入并修订自由正文，脚本不解析结构化结果；
+“完成”只表示进程正常退出且专属结果文件非空，不表示覆盖了全部范围。
 """
 import argparse
 import configparser
@@ -24,23 +24,31 @@ from review_backends import BACKENDS, command, effort_error, execute
 ROOT = Path(__file__).resolve().parent.parent
 
 REVIEW_RULES = '''你是一名专业的代码审查者。所有模型独立审核同一完整范围。
-允许用 bash 读取文件、搜索代码和检查依赖；禁止修改、创建、删除项目代码，禁止编译代码，禁止运行被审核程序。
-不要读取其他审核模型的结论。审核描述列的是入口，必须继续读取判断所需的调用方和依赖。
-不要自行把审核交给新的会话或子代理。
+允许读取文件、搜索代码和检查依赖；严禁修改、创建、删除被审核项目中的任何文件，禁止编译代码，禁止运行被审核程序。
+本次唯一允许写入和编辑的文件是下方的“本次结果文件”；禁止读写其他临时目录，禁止读取其他审核模型的结论。
+审核描述列的是入口，必须继续读取判断所需的调用方和依赖。不要自行把审核交给新的会话或子代理。
 以下五类问题不输出：过度防御（针对不可能出现的输入或状态）；设计范围内的预期行为；
 无实际影响的风格偏好；受框架、第三方库或历史接口约束而无法修复；现有调用链中无法触发。
-每条发现必须说明触发条件、实际影响、涉及文件路径和具体行号。代码标识符使用反引号。
-不要写任何结果文件，结论直接写在回复正文里。'''
+每条发现必须说明触发条件、实际影响、涉及文件路径和具体行号。代码标识符使用反引号。'''
 
-REVIEW_OUTPUT = '''用 Markdown 写审核结论，不要输出 JSON。
-先写问题，按严重程度排列；每条写清标题、严重程度（严重/一般/建议）、触发条件、实际影响、涉及文件与行号。
-没有发现问题时写“未发现问题”，并说明检查了哪些文件、核对过哪些关系。'''
+REVIEW_OUTPUT = '''审核结论用 Markdown 写入本次结果文件，不要输出 JSON，不要在结果文件中写“审核中”等进度占位文字：
+1. 边审核边记录：每核实确认一条有效问题，立即按格式写入本次结果文件。
+2. 随核实随修正：继续查调用链和依赖时，若发现已写入的问题不成立或重复，立即编辑结果文件删除；若严重程度、触发条件或行号有误，立即编辑修正。
+3. 结束前通读复核：全部范围检查完毕后，若没有任何有效问题，在本次结果文件中写“未发现问题”，并说明检查了哪些文件、核对过哪些调用关系。若有问题，重新读取本次结果文件，剔除上述五类不输出条目。确认所有问题按严重程度（严重/一般/建议）排列，且每条写清标题、严重程度、触发条件、实际影响、涉及文件与行号。
+确认本次结果文件保存定稿后即可结束，回复正文只需简短说明已完成，不必重复输出报告全文。'''
 
 SUMMARY_RULES = '''你是代码审核汇总者。只合并、整理相同问题，不核实问题，不读取源码，不添加新问题，不删除任何原始发现。
-禁止修改项目文件、编译代码或运行被审核程序。
+严禁修改被审核项目文件、编译代码或运行被审核程序；本次唯一允许写入和编辑的文件是下方的“本次结果文件”。
 合并后的每条发现必须保留完整触发条件、影响、文件行号，并注明提出该问题的模型名称。
 有的模型可能中途超时，正文不完整，按已有内容处理并在报告里说明。
-直接输出合并去重后的 Markdown 报告正文，不要输出 JSON，不要写文件。'''
+请将合并去重后的 Markdown 报告正文写入本次结果文件，不要输出 JSON，禁止写入运行目录或状态表。
+
+写入初稿后，必须重新读取本次结果文件逐项自检，发现遗漏或偏差直接编辑本次结果文件修正后再结束：
+1. 输入中每个有正文的模型是否都已处理；未完成模型是否已在报告中说明
+2. 合并后的每条发现是否保留触发条件、影响、文件行号，并注明提出该问题的模型名称
+3. 确认未添加新问题、未删除任何原始发现、未自行核实或改判
+4. 相同问题已合并，不同问题仍为独立条目
+确认本次结果文件修订完毕后，回复正文只需简短说明已完成，不必重复输出报告全文。'''
 
 
 class ReviewError(ValueError):
@@ -188,49 +196,54 @@ class ReviewRun:
             with (self.directory / 'run.log').open('a', encoding='utf-8') as handle:
                 handle.write(time.strftime('%Y-%m-%d %H:%M:%S ') + message + '\n')
 
-    def review_prompt(self):
+    def review_prompt(self, result_file):
         return (REVIEW_RULES + '\n' + REVIEW_OUTPUT
-                + f"\n\n审核内容：{self.state['content']}\n工作目录：{self.state['work_dir']}\n")
+                + f"\n\n审核内容：{self.state['content']}"
+                + f"\n被审核项目目录（只读）：{self.state['work_dir']}"
+                + f"\n本次结果文件（唯一可写路径）：{result_file}\n")
 
-    def summary_prompt(self, answers):
+    def summary_prompt(self, answers, result_file):
         blocks = []
         for item in answers:
             state = '完成' if item['status'] == 'complete' else '未完成，正文可能中断'
             blocks.append(f"### 模型 {item['model']}（{state}）\n{item['text']}")
-        return (SUMMARY_RULES + f"\n\n审核范围：{self.state['content']}\n工作目录：{self.state['work_dir']}"
+        return (SUMMARY_RULES
+                + f"\n\n审核范围：{self.state['content']}"
+                + f"\n被审核项目目录（只读）：{self.state['work_dir']}"
+                + f"\n本次结果文件（唯一可写路径）：{result_file}"
                 + '\n\n以下是各模型的审核结论：\n\n' + '\n\n'.join(blocks) + '\n')
 
-    def run_cli(self, model, prompt, output_dir, deadline, receive, summary=False, aggregate=None):
+    def run_cli(self, model, build_prompt, output_dir, deadline, summary=False, aggregate=None):
         output_dir.mkdir(parents=True, exist_ok=True)
-        prompt_file = output_dir / 'prompt.txt'
+        result_dir = output_dir / 'result'
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_file = result_dir / 'result.md'
+        input_dir = output_dir / 'input'
+        input_dir.mkdir(parents=True, exist_ok=True)
+        prompt = build_prompt(result_file)
+        prompt_file = input_dir / 'prompt.txt'
         prompt_file.write_text(prompt, encoding='utf-8')
         # 避免超长命令行；模型读取同一份完整提示。
-        cli_prompt = prompt if len(prompt.encode()) <= 48000 else \
+        use_prompt_file = len(prompt.encode()) > 48000
+        cli_prompt = prompt if not use_prompt_file else \
             f'请读取文件 {json.dumps(str(prompt_file), ensure_ascii=False)}，严格执行其中的全部要求。该文件是本次完整提示词。'
-        final_path = output_dir / 'final.txt'
         seconds = deadline - time.monotonic()
         if seconds <= 0 or self.stop.is_set():
-            return (130 if self.stop.is_set() else 124), 0.0, '运行被中断' if self.stop.is_set() else '时间预算已用完'
-        args, env, native = command(model['backend'], model['model_id'], cli_prompt, self.state['work_dir'],
-                                    final_path, seconds, summary, effort=model.get('effort', ''))
+            return ((130 if self.stop.is_set() else 124), 0.0,
+                    ('运行被中断' if self.stop.is_set() else '时间预算已用完'), '', False)
+        args, env = command(model['backend'], model['model_id'], cli_prompt, self.state['work_dir'],
+                            result_dir, seconds, summary, effort=model.get('effort', ''),
+                            input_dir=input_dir if use_prompt_file else None)
         # 只用于排障和测试识别，模型命令不依赖这两个变量。
         env['AGENT_REVIEW_MODEL'] = model['name']
         env['AGENT_REVIEW_ROLE'] = 'summary' if summary else 'review'
         seconds = deadline - time.monotonic()
         if seconds <= 0:
-            return 124, 0.0, '时间预算已用完'
-        collected = []
-
-        def forward(text):
-            collected.append(text)
-            receive(text)
-
-        rc, elapsed, reason = execute(args, env, self.state['work_dir'], output_dir, seconds, self.stop,
-                                      forward, native, aggregate)
-        # `codex` 同时输出事件流和 `-o` 文件；只有事件流没给正文时才读文件，避免重复。
-        if model['backend'] == 'codex' and final_path.exists() and not ''.join(collected).strip():
-            receive(final_path.read_text(encoding='utf-8', errors='replace'))
-        return rc, elapsed, reason
+            return 124, 0.0, '时间预算已用完', '', False
+        rc, elapsed, reason = execute(args, env, self.state['work_dir'], output_dir, seconds, self.stop, aggregate)
+        exists = result_file.is_file()
+        text = result_file.read_text(encoding='utf-8', errors='replace').strip() if exists else ''
+        return rc, elapsed, reason, text, exists
 
     def reviewer(self, key):
         model = self.state['models'][key]
@@ -250,11 +263,9 @@ class ReviewRun:
                 if remaining <= 0 or self.stop.is_set():
                     break
                 attempt_dir = model_dir / f'attempt-{attempt}'
-                parts = []
                 self.log(f"启动审核：{model['name']}，第 {attempt}/2 次，剩余 {math.ceil(remaining)} 秒")
-                rc, elapsed, reason = self.run_cli(model, self.review_prompt(), attempt_dir, deadline,
-                                                   parts.append, aggregate=model_dir)
-                text = ''.join(parts).strip()
+                rc, elapsed, reason, text, exists = self.run_cli(
+                    model, self.review_prompt, attempt_dir, deadline, aggregate=model_dir)
                 valid = rc == 0 and bool(text)
                 # 成功的正文一定覆盖；失败时只在比上次更长时覆盖，避免重试把更完整的结果冲掉。
                 if text and (valid or len(text) > best_chars):
@@ -268,8 +279,10 @@ class ReviewRun:
                         model['error'] = ''
                     elif reason:
                         model['error'] = reason
+                    elif not exists:
+                        model['error'] = f'退出码 {rc}，未生成结果文件' if rc else '未生成结果文件'
                     elif not text:
-                        model['error'] = f'退出码 {rc}，没有输出正文' if rc else '没有输出正文'
+                        model['error'] = f'退出码 {rc}，结果文件为空' if rc else '结果文件为空'
                     else:
                         model['error'] = f'退出码 {rc}，正文可能不完整'
                     self.save()
@@ -321,11 +334,10 @@ class ReviewRun:
                 return None
             deadline = time.monotonic() + self.args.summary_timeout
             target = summary_dir / f'attempt-{attempt}'
-            parts = []
             self.log(f'汇总第 {attempt}/3 次尝试')
-            rc, elapsed, reason = self.run_cli(self.state['summarizer'], self.summary_prompt(answers), target,
-                                               deadline, parts.append, summary=True)
-            text = ''.join(parts).strip()
+            rc, elapsed, _reason, text, _exists = self.run_cli(
+                self.state['summarizer'], lambda result_file: self.summary_prompt(answers, result_file),
+                target, deadline, summary=True)
             ok = rc == 0 and bool(text)
             self.state['summary_attempts'].append(dict(attempt=attempt, rc=rc, elapsed=elapsed,
                                                        chars=len(text), complete=ok))

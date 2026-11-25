@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -30,25 +31,27 @@ SUMMARY_BODY = """## 汇总结论
 """
 
 
-def emit_body(body, final=False, append=False):
-    if final and "-o" in sys.argv:
-        with Path(sys.argv[sys.argv.index("-o") + 1]).open("a" if append else "w", encoding="utf-8") as stream:
-            stream.write(body)
-    elif Path(sys.argv[0]).name == "codex" and "--json" in sys.argv:
-        print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": body}},
+def emit_stdout(text):
+    if Path(sys.argv[0]).name == "codex" and "--json" in sys.argv:
+        print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}},
                          ensure_ascii=False), flush=True)
     elif Path(sys.argv[0]).name == "opencode" and "--format" in sys.argv and sys.argv[sys.argv.index("--format") + 1] == "json":
-        print(json.dumps({"type": "text", "part": {"type": "text", "text": body}}, ensure_ascii=False), flush=True)
+        print(json.dumps({"type": "text", "part": {"type": "text", "text": text}}, ensure_ascii=False), flush=True)
     elif Path(sys.argv[0]).name == "kimi" and "stream-json" in sys.argv:
-        print(json.dumps({"role": "assistant", "content": body}, ensure_ascii=False), flush=True)
+        print(json.dumps({"role": "assistant", "content": text}, ensure_ascii=False), flush=True)
     elif Path(sys.argv[0]).name == "cursor-agent" and "stream-json" in sys.argv:
-        print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": body}]}},
+        print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}},
                          ensure_ascii=False), flush=True)
     else:
-        print(body, end="", flush=True)
+        print(text, flush=True)
 
 
-def record(role, model, prompt, prompt_file=None):
+def write_result(result_file, body):
+    result_file.parent.mkdir(parents=True, exist_ok=True)
+    result_file.write_text(body, encoding="utf-8")
+
+
+def record(role, model, prompt, result_file, prompt_file=None):
     log = Path(os.environ["MOCK_LOG"])
     with log.open("a+", encoding="utf-8") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
@@ -64,7 +67,8 @@ def record(role, model, prompt, prompt_file=None):
         row = {"request": {"kind": role, "model": model, "prompt": prompt}, "rule": key, "argv": sys.argv,
                "pid": os.getpid(), "time": time.monotonic(), "cwd": os.getcwd(),
                "opencode_config": os.environ.get("OPENCODE_CONFIG_CONTENT"),
-               "server_password_set": "OPENCODE_SERVER_PASSWORD" in os.environ, "prompt_file": prompt_file}
+               "server_password_set": "OPENCODE_SERVER_PASSWORD" in os.environ,
+               "prompt_file": prompt_file, "result_file": str(result_file)}
         stream.seek(0, 2)
         stream.write(json.dumps(row, ensure_ascii=False) + "\n")
         stream.flush()
@@ -78,9 +82,20 @@ def body_for(role, rule):
     return body
 
 
+def resolve_result_file(prompt, allowed_root):
+    match = re.search(r"^本次结果文件（唯一可写路径）：(.+)$", prompt, re.MULTILINE)
+    if match is None:
+        return None
+    path = Path(match.group(1).strip()).resolve()
+    if not path.is_relative_to(allowed_root):
+        raise RuntimeError("模拟进程只允许写入本次测试目录内的结果文件")
+    return path
+
+
 def main():
     role = os.environ.get("AGENT_REVIEW_ROLE", "review")
     model = os.environ.get("AGENT_REVIEW_MODEL", "")
+    allowed_root = Path(os.environ["MOCK_CONTROL"]).resolve().parent
     prompt = next((arg for arg in sys.argv[1:] if "审核内容：" in arg or "各模型的审核结论：" in arg), None)
     prompt_file = None
     if prompt is None:
@@ -88,13 +103,17 @@ def main():
         if reference is not None:
             prompt_file, _ = json.JSONDecoder().raw_decode(reference[len("请读取文件 "):])
             path = Path(prompt_file).resolve()
-            if not path.is_relative_to(Path(os.environ["MOCK_CONTROL"]).resolve().parent):
+            if not path.is_relative_to(allowed_root):
                 raise RuntimeError("模拟进程只允许读取本次测试目录内的提示文件")
             prompt = path.read_text(encoding="utf-8")
     if prompt is None:
         print("missing prompt", file=sys.stderr)
         return 91
-    rule = record(role, model, prompt, prompt_file)
+    result_file = resolve_result_file(prompt, allowed_root)
+    if result_file is None:
+        print("missing result_file", file=sys.stderr)
+        return 92
+    rule = record(role, model, prompt, result_file, prompt_file)
     mode = rule.get("mode", "complete")
     if rule.get("delay"):
         time.sleep(rule["delay"])
@@ -102,6 +121,12 @@ def main():
         print("模拟服务异常", file=sys.stderr, flush=True)
         return 7
     if mode == "empty":
+        return 0
+    if mode == "empty_file":
+        write_result(result_file, "   \n")
+        return 0
+    if mode == "stdout_only":
+        emit_stdout(body_for(role, rule))
         return 0
     if mode == "sleep":
         time.sleep(60)
@@ -123,12 +148,19 @@ def main():
         return 0
     body = body_for(role, rule)
     if mode == "partial_then_sleep":
-        # 先输出一部分正文，再挂起，用来验证超时后仍保留已输出内容。
-        emit_body(body, final=False)
-        sys.stdout.flush()
+        # 先把已确认的部分结论写入结果文件，再挂起，验证超时后保留阶段性文件结果。
+        write_result(result_file, body)
+        emit_stdout("正在继续检查其余模块")
         time.sleep(60)
         return 0
-    emit_body(body, final=True)
+    if mode == "revise":
+        emit_stdout("正在检查调用方，怀疑存在伪问题 DELETED_FALSE_POSITIVE")
+        write_result(result_file, "### [严重] DELETED_FALSE_POSITIVE\n\n初稿误报，待核对调用链。\n\n" + body)
+        write_result(result_file, body)
+        emit_stdout("已完成修订并定稿")
+        return 0
+    write_result(result_file, body)
+    emit_stdout("已完成并写入结果文件")
     if mode == "write_then_fail":
         return 7
     return 0
